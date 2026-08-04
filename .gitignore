@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Stored game transcripts (regenerable; can be large / contain LLM output)
+games/
+
+# Env / secrets
+.env
+.env.*
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
