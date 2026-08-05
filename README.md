@@ -2,11 +2,12 @@
 
 LLM agents play Mafia (Werewolf). Each game writes a self-proving JSON transcript
 and a self-contained **X-ray replay**: the public record beside every agent's
-private reasoning.
+private reasoning. A small web app (`webapp.py`) plays games on demand and streams
+them **live** — you watch each move appear next to the reasoning that produced it.
 
 ## What it is
 
-- 7 players: 2 Mafia, 1 Seer, 4 Villagers. Mafia kill one player each night; Town
+- 8 players: 2 Mafia, 1 Seer, 5 Villagers. Mafia kill one player each night; Town
   votes one out each day. First faction to control the game wins.
 - Each player is a language model. A player acts through a belief → reason → act
   loop and sees only what its role is allowed to see.
@@ -26,7 +27,10 @@ private reasoning.
 - `orchestrator.py` — the async play loop, retries, timeouts, and the cost ledger.
 - `transcript.py` — writes the JSON record and `replay_check` (re-applies every
   recorded action through the engine and asserts the state matches).
-- `scripts/play_llm.py` — play a game. `scripts/build_replay.py` — transcript → HTML.
+- `scripts/play_llm.py` — play a game. `scripts/build_replay.py` — transcript → HTML
+  (also drives the live board via a shared `build_steps`).
+- `webapp.py` — the FastAPI service: play games on demand, watch them live, and
+  browse past replays. `Dockerfile` + `fly.toml` deploy it on Fly.io.
 
 ## Two security boundaries
 
@@ -71,9 +75,38 @@ Step, play, or scrub the timeline; the roster shows every true role (an omniscie
 X-ray), and Mafia "mask" moments — an innocent public line beside private scheming
 — are flagged.
 
+## Web app (live X-ray)
+
+`webapp.py` is a small FastAPI service that plays games on demand and streams them
+**live** — the same X-ray view as the saved replay, but unfolding in real time.
+
+- The homepage's "Play a game" button starts a game and redirects to
+  `/watch/{job_id}`.
+- `/watch/{job_id}` is the replay page in **live mode**: it opens a Server-Sent
+  Events feed (`/play/stream/{job_id}`) and appends each step as the game plays,
+  auto-following the newest turn. When the game ends it links to the full,
+  scrubbable replay. One renderer (`build_replay`) drives both surfaces, so the
+  live board and the saved replay look identical.
+- Because it is public and every game spends real money, hard guards sit in front
+  of every game — a per-game cost ceiling, a global daily cap, and per-IP rate
+  limiting — all tunable by environment (see the top of `webapp.py`).
+
+Run locally:
+
+```
+pip install -e ".[web]"
+export ANTHROPIC_API_KEY=sk-...
+uvicorn webapp:app --reload        # http://localhost:8000
+```
+
+Deploy (Fly.io): `Dockerfile`, `fly.toml`, and a persistent volume for `games/`
+are included. `fly deploy` builds and ships it; the API key is a Fly **secret**
+(`fly secrets set ANTHROPIC_API_KEY=...`), never baked into the image.
+
 ## Demo games
 
-Two live Haiku games (prompt `v1`), each with its replay built alongside:
+Two live Haiku games (prompt `v1`, from the earlier 7-player setup), each with its
+replay built alongside:
 
 - `games/20260804T142046Z_0_simultaneous.*` — **short & punchy.** Mafia win in one
   day. The Seer (p1) confirms a Mafia but pushes too early, looks like scum, and
