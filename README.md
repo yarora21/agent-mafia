@@ -13,6 +13,7 @@ them **live** — you watch each move appear next to the reasoning that produced
   loop and sees only what its role is allowed to see.
 - The engine is pure and deterministic. It never imports an LLM. All randomness
   comes from the seed.
+- Seeds set starting roles for each player. The LLM outputs can (and will) make the same seed produce different outcomes.
 
 ## Layout
 
