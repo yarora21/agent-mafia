@@ -1,0 +1,51 @@
+# Fly.io config for the Mafia X-Ray service.
+#
+# IMPORTANT: the abuse guards (max-concurrent, per-IP rate) are in-memory, so
+# they are only correct on a SINGLE machine. This file pins one always-on
+# machine (auto_stop off, min_machines_running = 1). Do NOT `fly scale count`
+# above 1 without moving the guards to shared storage (Redis, etc.).
+
+app = "mafia-xray"          # rename to your app: `fly apps create <name>`
+primary_region = "iad"      # pick one near you: `fly platform regions`
+
+[build]
+
+[env]
+  GAMES_DIR = "/data/games"
+  PORT = "8080"
+  # Guards — tune these. See webapp.py for what each does.
+  GAME_COST_CEILING_USD = "0.50"
+  DAILY_COST_CAP_USD = "3.00"
+  MAX_CONCURRENT_GAMES = "1"
+  GAMES_PER_IP_PER_HOUR = "5"
+  # ANTHROPIC_API_KEY is NOT set here — it is a secret:
+  #   fly secrets set ANTHROPIC_API_KEY=sk-...
+
+# Persistent volume so games/ (and thus the recovered daily-spend total) survive
+# restarts. Create it once: `fly volumes create mafia_data --size 1 --region iad`
+[mounts]
+  source = "mafia_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"      # keep the single machine up (see note above)
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 50
+    soft_limit = 25
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"          # langgraph + langchain + pydantic; 512MB is tight

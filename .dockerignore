@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+.mypy_cache
+.pytest_cache
+__pycache__
+**/__pycache__
+*.pyc
+games
+tests
+*.md
+!README.md
+fly.toml
+.dockerignore
+Dockerfile
