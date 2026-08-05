@@ -14,8 +14,8 @@ primary_region = "iad"      # pick one near you: `fly platform regions`
   GAMES_DIR = "/data/games"
   PORT = "8080"
   # Guards — tune these. See webapp.py for what each does.
-  GAME_COST_CEILING_USD = "0.50"
-  DAILY_COST_CAP_USD = "3.00"
+  GAME_COST_CEILING_USD = "1.00"
+  DAILY_COST_CAP_USD = "5.00"
   MAX_CONCURRENT_GAMES = "1"
   GAMES_PER_IP_PER_HOUR = "5"
   # ANTHROPIC_API_KEY is NOT set here — it is a secret:
