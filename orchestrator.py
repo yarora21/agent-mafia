@@ -23,7 +23,7 @@ random agent always does.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 
 from agents.interface import AgentInterface
@@ -128,6 +128,7 @@ async def play_game(
     mode: VotingMode,
     reliability: ReliabilityConfig | None = None,
     cost_ledger: CostLedger | None = None,
+    on_action: Callable[[Action, GameState], Awaitable[None]] | None = None,
 ) -> RunResult:
     """Play one full game to `GAME_OVER` (or a recorded abort), returning the run.
 
@@ -230,6 +231,10 @@ async def play_game(
         for req, action in zip(reqs, solicited):
             state = apply(state, action)
             result.actions.append(action)
+            if on_action is not None:
+                # Live spectator hook: emit each applied action + the state it
+                # produced, so a caller can stream the game as it plays.
+                await on_action(action, state)
             if state.phase is Phase.GAME_OVER:
                 break
 

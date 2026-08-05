@@ -26,17 +26,19 @@ Job state lives in memory (lost on restart); transcripts and replays persist to
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 import uuid
 from collections import defaultdict, deque
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from config import GameConfig, api_key_from_env
@@ -83,6 +85,9 @@ class Job:
     replay_file: str | None = None  # basename under games/, served statically
     error: str | None = None
     started_at: float = field(default_factory=time.time)
+    # Live X-ray feed: every event emitted as the game plays, buffered so a
+    # spectator who connects late (or reconnects) can replay from the start.
+    events: list[dict[str, object]] = field(default_factory=list)
 
 
 @dataclass
@@ -156,9 +161,14 @@ async def _run_game(job: Job, seed: int, mode: VotingMode) -> None:
         voting_mode=mode,
         cost_ceiling_usd=GAME_COST_CEILING_USD,
     )
+
+    async def emit(event: dict[str, object]) -> None:
+        job.events.append(event)
+
+    job.events.append({"type": "start", "seed": seed, "mode": mode})
     try:
         transcript, _run = await play_llm(
-            config, factory=anthropic_factory(api_key), write=False
+            config, factory=anthropic_factory(api_key), write=False, on_event=emit
         )
         job.cost_usd = transcript.run.total_cost_usd
         job.winner = transcript.winner.value if transcript.winner else None
@@ -169,9 +179,19 @@ async def _run_game(job: Job, seed: int, mode: VotingMode) -> None:
 
         job.replay_file = html_path.name
         job.status = "done"
+        job.events.append(
+            {
+                "type": "done",
+                "status": "done",
+                "winner": job.winner,
+                "cost_usd": round(job.cost_usd, 4),
+                "replay_url": f"/games/{job.replay_file}",
+            }
+        )
     except Exception as exc:  # a crashed game must still free the slot + count spend
         job.error = f"{type(exc).__name__}: {exc}"
         job.status = "failed"
+        job.events.append({"type": "done", "status": "failed", "error": job.error})
     finally:
         spend.add(job.cost_usd)
 
@@ -274,6 +294,38 @@ async def job_status(job_id: str) -> JSONResponse:
     )
 
 
+@app.get("/play/stream/{job_id}")
+async def play_stream(job_id: str) -> StreamingResponse:
+    """Server-Sent Events feed of one game's live X-ray.
+
+    Replays the job's buffered events from the start (so a late or reconnecting
+    spectator misses nothing), then tails new ones until the game ends. A comment
+    heartbeat every tick keeps Fly's proxy from dropping an idle connection.
+    """
+
+    async def gen() -> AsyncIterator[str]:
+        sent = 0
+        while True:
+            job = jobs.get(job_id)
+            if job is None:
+                yield 'event: gone\ndata: {"error": "no such job"}\n\n'
+                return
+            while sent < len(job.events):
+                yield f"data: {json.dumps(job.events[sent])}\n\n"
+                sent += 1
+            if job.status in ("done", "failed"):
+                yield "event: end\ndata: {}\n\n"
+                return
+            yield ": keep-alive\n\n"
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/health")
 async def health() -> JSONResponse:
     return JSONResponse(
@@ -321,6 +373,13 @@ ul{list-style:none;padding:0;margin:0}
 li{padding:8px 0;border-bottom:1px solid #1b2035}
 li a{color:#4aa3ff;text-decoration:none}
 li.empty{color:#8c93ad}
+#live{display:flex;flex-direction:column;gap:10px}
+.turn{border:1px solid #272d44;border-radius:10px;padding:10px 12px;background:#0f1322}
+.turn .who{font-size:12px;color:#8c93ad;letter-spacing:.4px;text-transform:uppercase;margin-bottom:4px}
+.turn .who b{color:#e8ebf5}
+.turn .say{white-space:pre-wrap}
+.turn .think{margin-top:8px;padding-top:8px;border-top:1px dashed #272d44;color:#8c93ad;font-size:13px;font-style:italic;white-space:pre-wrap}
+.turn .think .lbl{font-style:normal;text-transform:uppercase;letter-spacing:.5px;font-size:11px;color:#5c6480;display:block;margin-bottom:2px}
 </style></head><body><div class="wrap">
 <h1>🎭 Mafia X-Ray</h1>
 <p class="muted">LLM agents play Mafia. Start a live game, then scrub the replay:
@@ -332,25 +391,50 @@ minutes and cost a few cents; a shared daily budget limits total spend.</p>
   <button id="go" style="margin-left:12px">Play a game</button>
   <div id="status"></div>
 </div>
+<div class="panel" id="livepanel" style="display:none"><h2 style="font-size:13px;text-transform:uppercase;letter-spacing:1px;color:#8c93ad;margin-top:0">Live game — public move beside private reasoning</h2>
+<div id="live"></div></div>
 <div class="panel"><h2 style="font-size:13px;text-transform:uppercase;letter-spacing:1px;color:#8c93ad;margin-top:0">Finished games</h2>
 <ul>__CARDS__</ul></div>
 </div><script>
 const go=document.getElementById('go'), st=document.getElementById('status');
+const livepanel=document.getElementById('livepanel'), live=document.getElementById('live');
+function esc(s){ const d=document.createElement('div'); d.textContent=(s==null?'':String(s)); return d.innerHTML; }
+function publicText(a){
+  if(a.message!==undefined) return a.message;
+  if(a.target!==undefined) return 'targets '+a.target;
+  const rest=Object.assign({},a); delete rest.actor_id; delete rest.type;
+  const keys=Object.keys(rest);
+  return keys.length ? JSON.stringify(rest) : '(no public content)';
+}
+function renderAction(ev){
+  const a=ev.action||{};
+  const el=document.createElement('div'); el.className='turn';
+  let html=`<div class="who">day ${esc(ev.day)} · ${esc(ev.phase)} — <b>${esc(a.actor_id)}</b> · ${esc(a.type)}</div>`+
+           `<div class="say">${esc(publicText(a))}</div>`;
+  if(ev.reasoning) html+=`<div class="think"><span class="lbl">private reasoning</span>${esc(ev.reasoning)}</div>`;
+  el.innerHTML=html;
+  live.appendChild(el);
+  el.scrollIntoView({block:'nearest'});
+}
 go.onclick=async()=>{
-  go.disabled=true; st.textContent='Starting…';
+  go.disabled=true; st.textContent='Starting…'; live.innerHTML=''; livepanel.style.display='none';
   const seed=document.getElementById('seed').value, mode=document.getElementById('mode').value;
   let r=await fetch(`/play?seed=${encodeURIComponent(seed)}&mode=${encodeURIComponent(mode)}`,{method:'POST'});
   let j=await r.json();
   if(!r.ok){ st.textContent='⛔ '+(j.error||'could not start'); go.disabled=false; return; }
   const id=j.job_id;
-  st.textContent='Playing… this takes a few minutes.';
-  const poll=setInterval(async()=>{
-    const s=await(await fetch(`/jobs/${id}`)).json();
-    if(s.status==='running'){ st.textContent=`Playing… $${(s.cost_usd||0).toFixed(3)} so far.`; return; }
-    clearInterval(poll); go.disabled=false;
-    if(s.status==='done'){ st.innerHTML=`✅ ${(s.winner||'?').toUpperCase()} won ($${s.cost_usd.toFixed(3)}). `+
-      `<a href="${s.replay_url}">Open the replay →</a>`; }
-    else { st.textContent='⛔ '+(s.error||'game failed'); }
-  }, 3000);
+  st.textContent='Playing… watch it unfold below.'; livepanel.style.display='';
+  const es=new EventSource(`/play/stream/${id}`);
+  es.onmessage=(e)=>{
+    const ev=JSON.parse(e.data);
+    if(ev.type==='action'){ renderAction(ev); st.textContent=`Playing… $${(ev.cost_usd||0).toFixed(3)} so far.`; }
+    else if(ev.type==='done'){
+      if(ev.status==='done'){ st.innerHTML=`✅ ${String(ev.winner||'?').toUpperCase()} won ($${(ev.cost_usd||0).toFixed(3)}). `+
+        `<a href="${ev.replay_url}">Open the full replay →</a>`; }
+      else { st.textContent='⛔ '+(ev.error||'game failed'); }
+    }
+  };
+  es.addEventListener('end',()=>{ es.close(); go.disabled=false; });
+  es.addEventListener('gone',()=>{ es.close(); go.disabled=false; });
 };
 </script></body></html>"""

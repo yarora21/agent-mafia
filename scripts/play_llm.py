@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TypeVar, cast
 
 from pydantic import BaseModel
@@ -39,6 +39,7 @@ from agents.llm_agent import CostCallback, LlmAgent, ModelClient, StepRecord, To
 from agents.narrator_agent import NarratorAgent
 from agents.prompts import PROMPT_VERSION
 from config import GameConfig, api_key_from_env, validate_models
+from engine.actions import Action
 from engine.state import NARRATOR_ID, GameState, VotingMode, new_game
 from orchestrator import CostLedger, ReliabilityConfig, RunResult, play_game
 from transcript import Transcript, build_transcript, replay_check, write_transcript
@@ -173,6 +174,7 @@ async def play_llm(
     factory: ClientFactory,
     write: bool = False,
     out_dir: str = "games",
+    on_event: Callable[[dict[str, object]], Awaitable[None]] | None = None,
 ) -> tuple[Transcript, RunResult]:
     """Play one full game with LLM agents from `factory`; build + self-check it.
 
@@ -188,12 +190,37 @@ async def play_llm(
     ledger = CostLedger()
     agents = build_agents(state, stamped, factory, ledger)
 
+    async def _on_action(action: Action, at_state: GameState) -> None:
+        """Bridge each applied action to the caller as a full X-ray event.
+
+        Pulls the acting agent's most recent `StepRecord` so the live event
+        carries the private reasoning behind the public move. Random/narrator or
+        fallback turns have no `step_records`, so `reasoning` is simply absent.
+        """
+
+        if on_event is None:
+            return
+        agent = agents.get(action.actor_id)
+        steps = getattr(agent, "step_records", None)
+        reasoning = steps[-1].reasoning if steps else None
+        await on_event(
+            {
+                "type": "action",
+                "phase": at_state.phase.value,
+                "day": at_state.day_number,
+                "action": action.model_dump(mode="json"),
+                "reasoning": reasoning,
+                "cost_usd": round(ledger.total, 4),
+            }
+        )
+
     run = await play_game(
         agents,
         seed=stamped.seed,
         mode=stamped.voting_mode,
         reliability=_reliability(stamped),
         cost_ledger=ledger,
+        on_action=_on_action if on_event is not None else None,
     )
 
     transcript = build_transcript(
