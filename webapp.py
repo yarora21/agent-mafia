@@ -157,10 +157,10 @@ async def _run_game(job: Job, seed: int, mode: VotingMode) -> None:
         cost_ceiling_usd=GAME_COST_CEILING_USD,
     )
     try:
-        transcript, run = await play_llm(
+        transcript, _run = await play_llm(
             config, factory=anthropic_factory(api_key), write=False
         )
-        job.cost_usd = run.total_cost_usd
+        job.cost_usd = transcript.run.total_cost_usd
         job.winner = transcript.winner.value if transcript.winner else None
 
         json_path = write_transcript(transcript, GAMES_DIR)
