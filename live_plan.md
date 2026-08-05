@@ -29,7 +29,7 @@ late-join, reconnect, and multi-viewer for free.
 
 ## Slices
 
-### Slice 1 — live pipe, full X-ray (IN PROGRESS)
+### Slice 1 — live pipe, full X-ray (DONE, deployed)
 - `orchestrator.py`: optional `on_action(action, state)` async callback, awaited
   after each `apply`.
 - `scripts/play_llm.py`: `on_event` param; inner `_on_action` pulls the actor's
@@ -40,9 +40,20 @@ late-join, reconnect, and multi-viewer for free.
 - Frontend: `EventSource` renders each turn (public move + private reasoning) as
   it arrives.
 
-### Slice 2 — match the replay look
-Reuse `build_replay`'s components so the live board and the saved replay look
-identical. At game end, swap in the existing "Open full replay →" link.
+### Slice 2 — match the replay look (DONE, pending deploy)
+Approach chosen: instead of duplicating the replay's CSS/JS into the index, the
+**replay page itself runs in "live mode"** — one renderer, both surfaces.
+- `scripts/build_replay.py`: extracted shared `build_steps(state, reasoning)`;
+  added `render_live(job_id, seed, mode)`; the template JS now branches on
+  `DATA.live` (append streamed steps, auto-follow the newest, hide the scrubber,
+  show a ● LIVE pill, link to the full replay on done).
+- `scripts/play_llm.py`: `_flush` emits the *exact replay step shape* (roster +
+  per-step events) via `build_steps`, plus a trailing flush for the final
+  automatic events (last vote outcome, game-over).
+- `webapp.py`: new `GET /watch/{job_id}` serves the live page; "Play a game" now
+  redirects there; the Slice-1 inline panel was removed.
+Verified: replay parity (finished replay byte-identical), mypy clean, dry-run
+stream = roster then steps ending in `game_over`, TestClient routes OK.
 
 ### Slice 3 — past-transcript polish + spectating
 - Richer "Finished games" index (winner / date / cost / mode from `RunSummary`).

@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from engine.actions import ActionType
-from engine.state import EventType, Faction, faction_of
+from engine.state import EventType, Faction, GameState, faction_of
 from transcript import NodeOutputs, Transcript, load_transcript
 
 # Which agent action produced each agent-driven event (others are automatic).
@@ -96,10 +96,18 @@ def _reasoning_payload(node: NodeOutputs) -> dict[str, Any]:
     }
 
 
-def build_view_model(transcript: Transcript) -> dict[str, Any]:
-    """Fuse the public history and the private reasoning into one render model."""
+def build_steps(
+    state: GameState, reasoning: dict[str, list[NodeOutputs]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Fuse a state's public history with per-turn reasoning into (players, steps).
 
-    roles = {p.id: p.role for p in transcript.final_state.players}
+    Shared by the finished-game replay (`build_view_model`) and the live stream
+    (`scripts.play_llm`), so the live board and the saved replay are built from the
+    exact same step shape and therefore render identically. `state` may be a game
+    in progress: only the history and reasoning present so far are fused.
+    """
+
+    roles = {p.id: p.role for p in state.players}
     players = [
         {
             "id": p.id,
@@ -107,12 +115,12 @@ def build_view_model(transcript: Transcript) -> dict[str, Any]:
             "role": p.role.value,
             "faction": faction_of(p.role).value,
         }
-        for p in sorted(transcript.final_state.players, key=lambda p: p.seat)
+        for p in sorted(state.players, key=lambda p: p.seat)
     ]
 
-    queues = _ReasoningQueues(transcript.reasoning)
+    queues = _ReasoningQueues(reasoning)
     steps: list[dict[str, Any]] = []
-    for e in transcript.final_state.history:
+    for e in state.history:
         node: NodeOutputs | None = None
         action_type = _EVENT_TO_ACTION.get(e.type)
         if action_type is not None:
@@ -146,6 +154,13 @@ def build_view_model(transcript: Transcript) -> dict[str, Any]:
             }
         )
 
+    return players, steps
+
+
+def build_view_model(transcript: Transcript) -> dict[str, Any]:
+    """Fuse a *finished* game's history and reasoning into one render model."""
+
+    players, steps = build_steps(transcript.final_state, transcript.reasoning)
     cfg = transcript.config
     return {
         "meta": {
@@ -186,6 +201,25 @@ def render_html(view_model: dict[str, Any]) -> str:
 
     data = escape_for_script(json.dumps(view_model, ensure_ascii=False))
     title = f"Mafia X-Ray — seed {view_model['meta']['seed']} ({view_model['meta']['mode']})"
+    return _TEMPLATE.replace("__TITLE__", title).replace("__DATA__", data)
+
+
+def render_live(job_id: str, seed: int, mode: str) -> str:
+    """The same replay page in *live* mode: no embedded steps, streamed instead.
+
+    Boots with an empty board and a `live.stream_url`; the page opens that SSE
+    feed, appends each step as it arrives, and auto-follows the newest — so a
+    game in progress looks exactly like its eventual replay, minus the scrubber.
+    """
+
+    boot = {
+        "live": {"stream_url": f"/play/stream/{job_id}"},
+        "steps": [],
+        "players": [],
+        "meta": {"seed": seed, "mode": mode},
+    }
+    data = escape_for_script(json.dumps(boot, ensure_ascii=False))
+    title = f"Mafia X-Ray — live (seed {seed}, {mode})"
     return _TEMPLATE.replace("__TITLE__", title).replace("__DATA__", data)
 
 
@@ -318,15 +352,21 @@ h2{font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:var(--mute
 <script id="game-data" type="application/json">__DATA__</script>
 <script>
 const DATA = JSON.parse(document.getElementById('game-data').textContent);
-const steps = DATA.steps, players = DATA.players, meta = DATA.meta;
+let steps = DATA.steps || [], players = DATA.players || [], meta = DATA.meta || {};
 const roleClass = r => r==='mafia'?'mafia':(r==='seer'?'seer':'town');
-const nameRole = {}; players.forEach(p=>nameRole[p.id]=p.role);
+let nameRole = {};
+function indexPlayers(){ nameRole={}; players.forEach(p=>nameRole[p.id]=p.role); }
 let i = 0, playing = false, timer = null;
+const scrub = document.getElementById('scrub');
 
-document.getElementById('meta').innerHTML =
-  `seed ${meta.seed} · ${meta.mode} · winner <span class="winner">${(meta.winner||'?').toUpperCase()}</span>`
-  + ` · ${meta.actions} actions · ${meta.fallbacks} fallbacks · $${meta.total_cost_usd.toFixed(4)}`;
-const scrub = document.getElementById('scrub'); scrub.max = steps.length-1;
+function renderMeta(){
+  let h = `seed ${meta.seed} · ${meta.mode}`;
+  if(meta.winner) h += ` · winner <span class="winner">${String(meta.winner).toUpperCase()}</span>`;
+  if(meta.actions!=null) h += ` · ${meta.actions} actions`;
+  if(meta.fallbacks!=null) h += ` · ${meta.fallbacks} fallbacks`;
+  if(meta.total_cost_usd!=null) h += ` · $${(+meta.total_cost_usd).toFixed(4)}`;
+  document.getElementById('meta').innerHTML = h;
+}
 
 function deadBefore(idx){
   const dead=new Set();
@@ -410,15 +450,48 @@ function play(){
   playing=true; document.getElementById('play').textContent='⏸';
   timer=setInterval(()=>{ if(i>=steps.length-1){stop();return;} go(i+1); }, 1400);
 }
-document.getElementById('next').onclick=()=>{stop();go(i+1)};
-document.getElementById('prev').onclick=()=>{stop();go(i-1)};
-document.getElementById('play').onclick=()=>{ playing?stop():play(); };
-scrub.oninput=e=>{stop();go(+e.target.value)};
-document.addEventListener('keydown',e=>{
-  if(e.key==='ArrowRight'){stop();go(i+1)} else if(e.key==='ArrowLeft'){stop();go(i-1)}
-  else if(e.key===' '){e.preventDefault();playing?stop():play()}
-});
-render();
+function startLive(){
+  document.querySelector('.controls').style.display='none';
+  const header=document.querySelector('header');
+  const pill=document.createElement('span'); pill.className='meta'; pill.id='livepill';
+  pill.innerHTML='<span style="color:var(--mafia)">● LIVE</span>';
+  header.appendChild(pill);
+  renderMeta();
+  const es=new EventSource(DATA.live.stream_url);
+  es.onmessage=(e)=>{
+    const ev=JSON.parse(e.data);
+    if(ev.type==='roster'){ players=ev.players||[]; Object.assign(meta,ev.meta||{}); indexPlayers(); renderMeta(); renderRoster(-1); }
+    else if(ev.type==='step'){ steps.push(ev.step); i=steps.length-1; render(); }
+    else if(ev.type==='done'){
+      Object.assign(meta,{winner:ev.winner, total_cost_usd:ev.cost_usd}); renderMeta();
+      const lp=document.getElementById('livepill'); if(lp) lp.remove();
+      const tail=document.createElement(ev.status==='done'&&ev.replay_url?'a':'span');
+      tail.className='meta'; tail.style.marginLeft='auto';
+      if(ev.status==='done'&&ev.replay_url){ tail.href=ev.replay_url; tail.style.color='var(--accent)'; tail.textContent='Open the full replay →'; }
+      else { tail.style.color='var(--mafia)'; tail.textContent='⛔ '+(ev.error||'game failed'); }
+      header.appendChild(tail);
+    }
+  };
+  es.addEventListener('end',()=>es.close());
+  es.addEventListener('gone',()=>es.close());
+}
+
+indexPlayers();
+if(DATA.live){
+  startLive();
+} else {
+  renderMeta();
+  scrub.max = steps.length-1;
+  document.getElementById('next').onclick=()=>{stop();go(i+1)};
+  document.getElementById('prev').onclick=()=>{stop();go(i-1)};
+  document.getElementById('play').onclick=()=>{ playing?stop():play(); };
+  scrub.oninput=e=>{stop();go(+e.target.value)};
+  document.addEventListener('keydown',e=>{
+    if(e.key==='ArrowRight'){stop();go(i+1)} else if(e.key==='ArrowLeft'){stop();go(i-1)}
+    else if(e.key===' '){e.preventDefault();playing?stop():play()}
+  });
+  render();
+}
 </script>
 </body>
 </html>

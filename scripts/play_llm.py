@@ -42,7 +42,14 @@ from config import GameConfig, api_key_from_env, validate_models
 from engine.actions import Action
 from engine.state import NARRATOR_ID, GameState, VotingMode, new_game
 from orchestrator import CostLedger, ReliabilityConfig, RunResult, play_game
-from transcript import Transcript, build_transcript, replay_check, write_transcript
+from scripts.build_replay import build_steps
+from transcript import (
+    NodeOutputs,
+    Transcript,
+    build_transcript,
+    replay_check,
+    write_transcript,
+)
 
 ClientFactory = Callable[[str], ModelClient]
 _S = TypeVar("_S", bound=BaseModel)
@@ -190,29 +197,40 @@ async def play_llm(
     ledger = CostLedger()
     agents = build_agents(state, stamped, factory, ledger)
 
-    async def _on_action(action: Action, at_state: GameState) -> None:
-        """Bridge each applied action to the caller as a full X-ray event.
+    # Live X-ray stream: emit the *same* step shape the replay renders, so the
+    # live board and the saved replay are the one renderer. Each flush fuses the
+    # history-so-far with the reasoning-so-far via the shared `build_steps`, then
+    # streams only the newly appeared steps (plus the roster, once, up front).
+    live_state: dict[str, int | bool] = {"emitted": 0, "roster_sent": False}
 
-        Pulls the acting agent's most recent `StepRecord` so the live event
-        carries the private reasoning behind the public move. Random/narrator or
-        fallback turns have no `step_records`, so `reasoning` is simply absent.
-        """
+    def _live_reasoning() -> dict[str, list[NodeOutputs]]:
+        out: dict[str, list[NodeOutputs]] = {}
+        for aid, ag in agents.items():
+            recs = getattr(ag, "step_records", None)
+            if recs:
+                out[aid] = [NodeOutputs.from_step_record(s) for s in recs]
+        return out
 
+    async def _flush(at_state: GameState) -> None:
         if on_event is None:
             return
-        agent = agents.get(action.actor_id)
-        steps = getattr(agent, "step_records", None)
-        reasoning = steps[-1].reasoning if steps else None
-        await on_event(
-            {
-                "type": "action",
-                "phase": at_state.phase.value,
-                "day": at_state.day_number,
-                "action": action.model_dump(mode="json"),
-                "reasoning": reasoning,
-                "cost_usd": round(ledger.total, 4),
-            }
-        )
+        players, all_steps = build_steps(at_state, _live_reasoning())
+        if not live_state["roster_sent"]:
+            await on_event(
+                {
+                    "type": "roster",
+                    "players": players,
+                    "meta": {"seed": stamped.seed, "mode": stamped.voting_mode.value},
+                }
+            )
+            live_state["roster_sent"] = True
+        emitted = int(live_state["emitted"])
+        for step in all_steps[emitted:]:
+            await on_event({"type": "step", "step": step})
+        live_state["emitted"] = len(all_steps)
+
+    async def _on_action(action: Action, at_state: GameState) -> None:
+        await _flush(at_state)
 
     run = await play_game(
         agents,
@@ -222,6 +240,10 @@ async def play_llm(
         cost_ledger=ledger,
         on_action=_on_action if on_event is not None else None,
     )
+    if on_event is not None:
+        # Final automatic events (last vote outcome, game-over) land after the
+        # last agent action, so no on_action fires for them — flush them now.
+        await _flush(run.final_state)
 
     transcript = build_transcript(
         stamped, run, step_records=collect_step_records(agents)

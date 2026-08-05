@@ -43,7 +43,7 @@ from fastapi.staticfiles import StaticFiles
 
 from config import GameConfig, api_key_from_env
 from engine.state import VotingMode
-from scripts.build_replay import build_replay
+from scripts.build_replay import build_replay, render_live
 from scripts.play_llm import anthropic_factory, play_llm
 from transcript import load_transcript, write_transcript
 
@@ -165,7 +165,6 @@ async def _run_game(job: Job, seed: int, mode: VotingMode) -> None:
     async def emit(event: dict[str, object]) -> None:
         job.events.append(event)
 
-    job.events.append({"type": "start", "seed": seed, "mode": mode})
     try:
         transcript, _run = await play_llm(
             config, factory=anthropic_factory(api_key), write=False, on_event=emit
@@ -294,6 +293,20 @@ async def job_status(job_id: str) -> JSONResponse:
     )
 
 
+@app.get("/watch/{job_id}", response_class=HTMLResponse)
+async def watch(job_id: str) -> HTMLResponse:
+    """The live X-ray board for one game — the replay page in live mode.
+
+    Same renderer as the saved replay; it opens this job's SSE feed and appends
+    steps as the game plays. When the game ends it links to the finished replay.
+    """
+
+    job = jobs.get(job_id)
+    if job is None:
+        return HTMLResponse("<p>No such game.</p>", status_code=404)
+    return HTMLResponse(render_live(job_id, job.seed, job.mode))
+
+
 @app.get("/play/stream/{job_id}")
 async def play_stream(job_id: str) -> StreamingResponse:
     """Server-Sent Events feed of one game's live X-ray.
@@ -373,13 +386,6 @@ ul{list-style:none;padding:0;margin:0}
 li{padding:8px 0;border-bottom:1px solid #1b2035}
 li a{color:#4aa3ff;text-decoration:none}
 li.empty{color:#8c93ad}
-#live{display:flex;flex-direction:column;gap:10px}
-.turn{border:1px solid #272d44;border-radius:10px;padding:10px 12px;background:#0f1322}
-.turn .who{font-size:12px;color:#8c93ad;letter-spacing:.4px;text-transform:uppercase;margin-bottom:4px}
-.turn .who b{color:#e8ebf5}
-.turn .say{white-space:pre-wrap}
-.turn .think{margin-top:8px;padding-top:8px;border-top:1px dashed #272d44;color:#8c93ad;font-size:13px;font-style:italic;white-space:pre-wrap}
-.turn .think .lbl{font-style:normal;text-transform:uppercase;letter-spacing:.5px;font-size:11px;color:#5c6480;display:block;margin-bottom:2px}
 </style></head><body><div class="wrap">
 <h1>🎭 Mafia X-Ray</h1>
 <p class="muted">LLM agents play Mafia. Start a live game, then scrub the replay:
@@ -391,50 +397,17 @@ minutes and cost a few cents; a shared daily budget limits total spend.</p>
   <button id="go" style="margin-left:12px">Play a game</button>
   <div id="status"></div>
 </div>
-<div class="panel" id="livepanel" style="display:none"><h2 style="font-size:13px;text-transform:uppercase;letter-spacing:1px;color:#8c93ad;margin-top:0">Live game — public move beside private reasoning</h2>
-<div id="live"></div></div>
 <div class="panel"><h2 style="font-size:13px;text-transform:uppercase;letter-spacing:1px;color:#8c93ad;margin-top:0">Finished games</h2>
 <ul>__CARDS__</ul></div>
 </div><script>
 const go=document.getElementById('go'), st=document.getElementById('status');
-const livepanel=document.getElementById('livepanel'), live=document.getElementById('live');
-function esc(s){ const d=document.createElement('div'); d.textContent=(s==null?'':String(s)); return d.innerHTML; }
-function publicText(a){
-  if(a.message!==undefined) return a.message;
-  if(a.target!==undefined) return 'targets '+a.target;
-  const rest=Object.assign({},a); delete rest.actor_id; delete rest.type;
-  const keys=Object.keys(rest);
-  return keys.length ? JSON.stringify(rest) : '(no public content)';
-}
-function renderAction(ev){
-  const a=ev.action||{};
-  const el=document.createElement('div'); el.className='turn';
-  let html=`<div class="who">day ${esc(ev.day)} · ${esc(ev.phase)} — <b>${esc(a.actor_id)}</b> · ${esc(a.type)}</div>`+
-           `<div class="say">${esc(publicText(a))}</div>`;
-  if(ev.reasoning) html+=`<div class="think"><span class="lbl">private reasoning</span>${esc(ev.reasoning)}</div>`;
-  el.innerHTML=html;
-  live.appendChild(el);
-  el.scrollIntoView({block:'nearest'});
-}
 go.onclick=async()=>{
-  go.disabled=true; st.textContent='Starting…'; live.innerHTML=''; livepanel.style.display='none';
+  go.disabled=true; st.textContent='Starting…';
   const seed=document.getElementById('seed').value, mode=document.getElementById('mode').value;
   let r=await fetch(`/play?seed=${encodeURIComponent(seed)}&mode=${encodeURIComponent(mode)}`,{method:'POST'});
   let j=await r.json();
   if(!r.ok){ st.textContent='⛔ '+(j.error||'could not start'); go.disabled=false; return; }
-  const id=j.job_id;
-  st.textContent='Playing… watch it unfold below.'; livepanel.style.display='';
-  const es=new EventSource(`/play/stream/${id}`);
-  es.onmessage=(e)=>{
-    const ev=JSON.parse(e.data);
-    if(ev.type==='action'){ renderAction(ev); st.textContent=`Playing… $${(ev.cost_usd||0).toFixed(3)} so far.`; }
-    else if(ev.type==='done'){
-      if(ev.status==='done'){ st.innerHTML=`✅ ${String(ev.winner||'?').toUpperCase()} won ($${(ev.cost_usd||0).toFixed(3)}). `+
-        `<a href="${ev.replay_url}">Open the full replay →</a>`; }
-      else { st.textContent='⛔ '+(ev.error||'game failed'); }
-    }
-  };
-  es.addEventListener('end',()=>{ es.close(); go.disabled=false; });
-  es.addEventListener('gone',()=>{ es.close(); go.disabled=false; });
+  st.textContent='Opening the live game…';
+  window.location='/watch/'+j.job_id;
 };
 </script></body></html>"""
