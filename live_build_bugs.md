@@ -8,6 +8,18 @@ Format per entry:
 
 ---
 
+## Add-a-villager (7 → 8 players)
+
+- **[2026-08-05] Seed-coupled reliability test broke on the deal change** —
+  `test_illegal_then_legal_is_retried_ok` scripted **p0** to answer illegally
+  once and asserted `retried_ok >= 1`. It relied on seed 7's *7-player* deal
+  making p0 act. After adding a villager, seed 7's 8-player deal makes p0 a
+  villager who dies Night 1 and never acts, so the retry never fires →
+  `assert 0 >= 1`. Root cause: the test was coupled to a specific seed's deal.
+  Fixed by switching to **seed 3**, where p0 is dealt Mafia (acts first in
+  Night-1 chat), and documenting *why* in the test so it won't silently re-break.
+  All 182 tests pass; mypy clean.
+
 ## Slice 1
 
 - **[2026-08-05] `GameState` has no `day` attribute** — the `_on_action` payload

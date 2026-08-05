@@ -38,7 +38,7 @@ class RenderedPrompt(BaseModel):
 # System prompts (the model's identity, one per role + narrator)
 # --------------------------------------------------------------------------- #
 _RULES = (
-    "You are playing Mafia (Werewolf) with 7 players. The Mafia know each other "
+    "You are playing Mafia (Werewolf) with 8 players. The Mafia know each other "
     "and secretly kill one player each night; the Town (Villagers and one Seer) "
     "must vote out the Mafia by day. Speak in character and keep replies short."
 )

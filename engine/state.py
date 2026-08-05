@@ -192,11 +192,12 @@ NARRATOR_ID = "narrator"
 """Actor id for the Narrator. Not a player — never in `players`, never votes,
 can't be killed or investigated, doesn't count toward win conditions."""
 
-NUM_PLAYERS = 7
+NUM_PLAYERS = 8
 ROLE_DEAL: tuple[Role, ...] = (
     Role.MAFIA,
     Role.MAFIA,
     Role.SEER,
+    Role.VILLAGER,
     Role.VILLAGER,
     Role.VILLAGER,
     Role.VILLAGER,
@@ -207,7 +208,7 @@ ROLE_DEAL: tuple[Role, ...] = (
 def new_game(seed: int, mode: VotingMode) -> GameState:
     """Deal a fresh game reproducibly from `(seed, mode)`.
 
-    Seats are 0..6 with ids ``p0``..``p6``; the seven roles are shuffled with a
+    Seats are 0..7 with ids ``p0``..``p7``; the eight roles are shuffled with a
     seeded RNG and assigned to seats. Same inputs always produce an identical
     starting state. No history yet — the game opens on Night 1, mafia chat.
     """

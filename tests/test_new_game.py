@@ -24,7 +24,7 @@ def test_role_counts() -> None:
     counts = Counter(p.role for p in state.players)
     assert counts[Role.MAFIA] == 2
     assert counts[Role.SEER] == 1
-    assert counts[Role.VILLAGER] == 4
+    assert counts[Role.VILLAGER] == 5
 
 
 def test_starting_position() -> None:

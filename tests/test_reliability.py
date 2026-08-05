@@ -81,6 +81,9 @@ async def test_raising_agents_are_retried_then_fall_back() -> None:
 # --------------------------------------------------------------------------- #
 async def test_illegal_then_legal_is_retried_ok() -> None:
     # p0 answers illegally once, then legally forever; everyone else is legal.
+    # Seed 3 deals p0 into the Mafia, so p0 is solicited first (Night-1 mafia
+    # chat) and its one illegal answer reliably exercises the retry path — a seed
+    # where p0 died before acting would never fire it.
     agents: dict[str, AgentInterface] = {
         f"p{i}": RandomAgent(seed=i) for i in range(NUM_PLAYERS)
     }
@@ -88,7 +91,7 @@ async def test_illegal_then_legal_is_retried_ok() -> None:
         script=[ScriptBehavior.ILLEGAL], default=ScriptBehavior.LEGAL, seed=99
     )
     agents[NARRATOR_ID] = RandomAgent(seed=100)
-    result = await play_game(agents, seed=7, mode=VotingMode.SEQUENTIAL, reliability=FAST)
+    result = await play_game(agents, seed=3, mode=VotingMode.SEQUENTIAL, reliability=FAST)
     _finished(result.final_state)
     assert result.retried_ok >= 1  # the illegal answer was retried and recovered
 
