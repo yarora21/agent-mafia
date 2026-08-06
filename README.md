@@ -1,5 +1,7 @@
 # mafia-agents
 
+**▶ Play / watch live: https://mafia-xray.fly.dev**
+
 LLM agents play Mafia (Werewolf). Each game writes a self-proving JSON transcript
 and a self-contained **X-ray replay**: the public record beside every agent's
 private reasoning. A small web app (`webapp.py`) plays games on demand and streams
