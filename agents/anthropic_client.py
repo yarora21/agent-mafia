@@ -29,6 +29,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from pydantic import BaseModel
 
 from agents.llm_agent import TokenUsage
+from agents.tracing import callback_config
 from config import DEFAULT_MODEL
 
 _DEFAULT_MAX_TOKENS = 1024
@@ -104,7 +105,12 @@ class AnthropicModelClient:
         structured = self._llm.with_structured_output(schema, include_raw=True)
         # A transport/auth error raises here by design (outage). A *parse* failure
         # does not, because include_raw=True routes it to parsed=None.
-        result = cast(dict[str, Any], await structured.ainvoke(self._messages(system, user)))
+        config = callback_config()
+        if config:
+            response = await structured.ainvoke(self._messages(system, user), config=config)
+        else:
+            response = await structured.ainvoke(self._messages(system, user))
+        result = cast(dict[str, Any], response)
         raw = result.get("raw")
         usage = self._usage(raw) if isinstance(raw, AIMessage) else TokenUsage()
         parsed = result.get("parsed")  # None when the model's reply didn't validate
@@ -113,7 +119,11 @@ class AnthropicModelClient:
     async def complete_text(
         self, *, system: str, user: str
     ) -> tuple[str | None, TokenUsage]:
-        message = await self._llm.ainvoke(self._messages(system, user))
+        config = callback_config()
+        if config:
+            message = await self._llm.ainvoke(self._messages(system, user), config=config)
+        else:
+            message = await self._llm.ainvoke(self._messages(system, user))
         assert isinstance(message, AIMessage)
         text = self._text_of(message)
         usage = self._usage(message)

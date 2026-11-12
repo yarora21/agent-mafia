@@ -127,3 +127,60 @@ python -m mypy --strict .
 
 Both must pass. The demo goal is one good, demoable game plus the X-ray replay —
 not a batch stats experiment. See `bugs.md` for known quirks.
+
+## Langfuse tracing
+
+The application uses Langfuse Python SDK **5.2.0**, with the native LangChain /
+LangGraph callback integration. Tracing is **off by default**. Configure it:
+
+1. Install dependencies with `pip install -e ".[dev,web]"`.
+2. Create a free [Langfuse Cloud](https://langfuse.com/cloud) project (or use your
+   own Langfuse server), then create project API keys under Settings → API Keys.
+3. Copy `.env.example` to `.env`, fill in the public/secret keys, set
+   `LANGFUSE_BASE_URL` to the project's region, and set
+   `LANGFUSE_TRACING_ENABLED=true`. Do not commit `.env` or paste keys into chat.
+4. Run `python -m scripts.play_llm --dry-run --no-write` to check graph traces
+   without spending model tokens. Dry runs have **no model generation spans**.
+5. Run `python -m scripts.play_llm --smoke` to verify one real Anthropic generation
+   (billed by Anthropic), then run a game normally. The web app uses the same
+   tracing paths; restart it after changing environment variables.
+
+The CLI and web startup load the project `.env` without overriding shell values.
+Library callers should call `agents.tracing.configure_tracing()` before running
+and `flush_tracing()` before exiting. CLI exit and web shutdown flush automatically.
+Missing configuration leaves tracing disabled; export errors do not change game
+results. Cloud delivery still depends on correct credentials and connectivity.
+
+In Langfuse, open **Sessions** and find the session ID printed by the CLI and saved
+as `run.tracing_session_id` in the transcript. Each player turn is a separate
+`play-player-turn` agent trace. It contains API attempts, the `decide-action`
+graph, belief/reason/act nodes, and model generations with final messages,
+responses, model name, token usage, and Langfuse's model-based cost calculation.
+The narrator's model calls are captured too. Rejected actions and referee
+fallbacks are explicit observations. `finish-game` records the winner, abort
+reason, retry/fallback totals, and the application's cost ledger. Langfuse's cost
+estimate can differ from the local pricing table in `config.py`.
+
+Filter by actor, day, phase, action type, seed, voting mode, model, prompt version,
+or memory strategy. Parallel votes have separate trace IDs and task-local
+callbacks. Partial failed attempts remain visible even without a completed
+`StepRecord`. The game engine has no tracing dependency.
+
+Traces intentionally include private game notes, role-visible state, and prompts
+for debugging. They go to your configured Langfuse project, not to other agents.
+Treat project access as access to game spoilers. Export-time masking redacts
+configured API keys and common API-key patterns from span attributes; it is not
+a general PII scrubber. No HTTP request, player IP, API client, or environment
+object is passed as trace input. Set `LANGFUSE_TRACING_ENABLED=false` and restart
+to stop export. Existing JSON transcripts and replay behavior remain available.
+
+Offline instrumentation checks use the **real SDK and a local OpenTelemetry
+exporter**, with no cloud or model calls:
+
+```
+python -m pytest tests/test_tracing.py -q
+```
+
+References: [LangChain integration](https://langfuse.com/integrations/frameworks/langchain),
+[trace best practices](https://langfuse.com/docs/observability/best-practices), and
+[export-time masking](https://langfuse.com/docs/observability/features/masking).

@@ -33,6 +33,7 @@ from pydantic import BaseModel
 from collections.abc import Mapping, Sequence
 
 from agents.anthropic_client import AnthropicModelClient
+from agents.tracing import configure_tracing, flush_tracing, player_turn
 from agents.beliefs import BeliefState, TextOutput
 from agents.interface import AgentInterface
 from agents.llm_agent import CostCallback, LlmAgent, ModelClient, StepRecord, TokenUsage
@@ -264,11 +265,12 @@ async def smoke(model: str, api_key: str | None) -> None:
     """
 
     client = AnthropicModelClient(model=model, api_key=api_key)
-    out, usage = await client.complete_structured(
-        system="You are a Mafia player. Reply with a one-line message.",
-        user="Say hello to the table in character.",
-        schema=TextOutput,
-    )
+    with player_turn(session_id=None, metadata={"feature": "smoke"}, input="Say hello to the table"):
+        out, usage = await client.complete_structured(
+            system="You are a Mafia player. Reply with a one-line message.",
+            user="Say hello to the table in character.",
+            schema=TextOutput,
+        )
     print(f"smoke: parsed={out!r} usage={usage}")
 
 
@@ -284,6 +286,8 @@ def _summary(transcript: Transcript, run: RunResult) -> str:
         f"total cost: ${r.total_cost_usd:.4f}",
         f"prompt_version: {transcript.config.prompt_version}",
     ]
+    if r.tracing_session_id:
+        lines.append(f"langfuse session: {r.tracing_session_id}")
     if r.abort_reason:
         lines.append(f"abort_reason: {r.abort_reason}")
     return "\n".join(lines)
@@ -304,7 +308,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> None:
+def _main(argv: list[str] | None = None) -> None:
+    configure_tracing()
     args = _parse_args(argv)
     api_key = api_key_from_env()
 
@@ -322,6 +327,13 @@ def main(argv: list[str] | None = None) -> None:
         play_llm(config, factory=factory, write=not args.no_write)
     )
     print(_summary(transcript, run))
+
+
+def main(argv: list[str] | None = None) -> None:
+    try:
+        _main(argv)
+    finally:
+        flush_tracing()
 
 
 if __name__ == "__main__":  # pragma: no cover

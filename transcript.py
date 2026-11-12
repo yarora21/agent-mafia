@@ -108,6 +108,7 @@ class RunSummary(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    tracing_session_id: str | None = None
     retried_ok: int = 0
     fallbacks: int = 0
     api_retries: int = 0
@@ -182,6 +183,7 @@ def build_transcript(
         final_state=run.final_state,
         winner=winner(run.final_state),
         run=RunSummary(
+            tracing_session_id=run.tracing_session_id,
             retried_ok=run.retried_ok,
             fallbacks=run.fallbacks,
             api_retries=run.api_retries,

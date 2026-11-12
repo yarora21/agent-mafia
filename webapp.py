@@ -198,7 +198,20 @@ async def _run_game(job: Job, seed: int, mode: VotingMode) -> None:
 # --------------------------------------------------------------------------- #
 # App + routes
 # --------------------------------------------------------------------------- #
+from agents.tracing import configure_tracing, flush_tracing
+
 app = FastAPI(title="Mafia X-Ray")
+
+
+@app.on_event("startup")
+async def _start_tracing() -> None:
+    configure_tracing()
+
+
+@app.on_event("shutdown")
+async def _flush_tracing() -> None:
+    await asyncio.to_thread(flush_tracing)
+
 
 GAMES_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/games", StaticFiles(directory=str(GAMES_DIR)), name="games")

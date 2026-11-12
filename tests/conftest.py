@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+import pytest
+
 from engine.state import (
     Event,
     EventType,
@@ -78,3 +80,10 @@ def after_night(
         target_id=kill,
     )
     return state.model_copy(update={"history": [kill_event]})
+
+
+@pytest.fixture(autouse=True)
+def isolate_tracing_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep offline tests independent of developer credentials and .env files."""
+    monkeypatch.setenv("LANGFUSE_TRACING_ENABLED", "false")
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *args, **kwargs: False)

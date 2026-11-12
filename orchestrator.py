@@ -23,13 +23,16 @@ random agent always does.
 from __future__ import annotations
 
 import asyncio
+from uuid import uuid4
+
+from agents import tracing
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 
 from agents.interface import AgentInterface
 from agents.random_agent import RandomAgent
 from engine.actions import Action, ActionRequest
-from engine.engine import apply, next_requests, resolve_automatic
+from engine.engine import apply, next_requests, resolve_automatic, winner
 from engine.referee import coerce_action, validate_action
 from engine.state import (
     NARRATOR_ID,
@@ -97,6 +100,7 @@ class RunResult:
     """
 
     final_state: GameState
+    tracing_session_id: str | None = None
     actions: list[Action] = field(default_factory=list)
     cursors: dict[str, int] = field(default_factory=dict)
     cost: CostLedger = field(default_factory=CostLedger)
@@ -147,7 +151,10 @@ async def play_game(
 
     cfg = reliability or ReliabilityConfig()
     state = new_game(seed=seed, mode=mode)
-    result = RunResult(final_state=state)
+    result = RunResult(
+        final_state=state,
+        tracing_session_id=uuid4().hex if tracing.enabled() else None,
+    )
     if cost_ledger is not None:
         result.cost = cost_ledger
     result.cursors = {actor: -1 for actor in agents}
@@ -161,9 +168,14 @@ async def play_game(
         attempt = 0
         while True:
             try:
-                action = await asyncio.wait_for(
-                    agent.act(view, req), cfg.timeout_seconds
-                )
+                with tracing.observation(
+                    "attempt-action", input={"actor_id": req.actor_id},
+                    metadata={"api_attempt": attempt + 1},
+                ) as attempt_span:
+                    action = await asyncio.wait_for(
+                        agent.act(view, req), cfg.timeout_seconds
+                    )
+                    attempt_span.update(output=action.model_dump(mode="json") if action else None)
                 return action, False
             except Exception:  # outage or timeout — a non-response, not a bad answer
                 if attempt >= cfg.api_retries:
@@ -173,7 +185,7 @@ async def play_game(
                     await asyncio.sleep(cfg.backoff_base * (2**attempt))
                 attempt += 1
 
-    async def solicit(at_state: GameState, req: ActionRequest) -> Action:
+    async def _solicit(at_state: GameState, req: ActionRequest) -> Action:
         view = observable_view(at_state, req.actor_id)
         if view.events:
             result.cursors[req.actor_id] = view.events[-1].event_id
@@ -185,18 +197,44 @@ async def play_game(
             action, outage = await call_with_backoff(agent, view, req)
             if outage:
                 result.fallbacks += 1
-                return coerce_action(at_state, req, None)
+                with tracing.observation("fallback-action", input={"reason": "api_retries_exhausted"}) as fallback:
+                    action = coerce_action(at_state, req, None)
+                    fallback.update(output=action.model_dump(mode="json"), level="WARNING")
+                    return action
             legal = action is not None and validate_action(at_state, req, action) is None
             if legal:
                 assert action is not None
                 if malformed_attempts > 0:
                     result.retried_ok += 1
                 return action
+            with tracing.observation(
+                "reject-action", input=action.model_dump(mode="json") if action else None,
+            ) as rejected:
+                rejected.update(level="WARNING", output={
+                    "reason": validate_action(at_state, req, action) if action else "empty or malformed output",
+                    "malformed_attempt": malformed_attempts + 1,
+                })
             malformed_attempts += 1
             if malformed_attempts <= cfg.malformed_retries:
                 continue  # re-solicit; a real LLM gets the validation reason back
             result.fallbacks += 1
-            return coerce_action(at_state, req, None)
+            with tracing.observation("fallback-action", input={"reason": "malformed_retries_exhausted"}) as fallback:
+                action = coerce_action(at_state, req, None)
+                fallback.update(output=action.model_dump(mode="json"), level="WARNING")
+                return action
+
+    async def solicit(at_state: GameState, req: ActionRequest) -> Action:
+        view = observable_view(at_state, req.actor_id)
+        with tracing.player_turn(
+            session_id=result.tracing_session_id,
+            metadata={"actor_id": req.actor_id, "day": at_state.day_number,
+                      "phase": at_state.phase.value, "seed": seed, "mode": mode.value,
+                      "action_type": req.action_type.value},
+            input={"request": req.model_dump(mode="json"), "view": view.model_dump(mode="json")},
+        ) as turn:
+            action = await _solicit(at_state, req)
+            turn.update(output=action.model_dump(mode="json"))
+            return action
 
     guard = 0
     while state.phase is not Phase.GAME_OVER:
@@ -239,6 +277,12 @@ async def play_game(
                 break
 
     result.final_state = state
+    tracing.record_game_summary(result.tracing_session_id, {
+        "winner": victor.value if (victor := winner(state)) else None,
+        "aborted": result.aborted, "abort_reason": result.abort_reason,
+        "actions": len(result.actions), "fallbacks": result.fallbacks,
+        "api_retries": result.api_retries, "cost_usd": result.cost.total,
+    })
     return result
 
 

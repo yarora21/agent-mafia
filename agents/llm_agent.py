@@ -26,6 +26,9 @@ from typing import Any, Protocol, TypedDict, TypeVar, cast, runtime_checkable
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, ConfigDict
 
+from agents.tracing import callback_config
+from agents.prompts import PROMPT_VERSION
+
 from agents.beliefs import (
     BeliefState,
     TargetOutput,
@@ -269,7 +272,11 @@ class LlmAgent:
             "usage": TokenUsage(),
         }
         # An outage raised by the ModelClient propagates here by design.
-        final = cast(_TurnState, await self._graph.ainvoke(initial))
+        final = cast(_TurnState, await self._graph.ainvoke(initial, config={
+            **callback_config(), "run_name": "decide-action",
+            "metadata": {"model": self._model, "prompt_version": PROMPT_VERSION,
+                         "memory_strategy": self._strategy.value},
+        }))
 
         self._belief = final.get("belief", belief_before)
         usage = final.get("usage", TokenUsage())
